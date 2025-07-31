@@ -2,6 +2,7 @@ package services
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"questoes/config"
@@ -9,11 +10,12 @@ import (
 	"strings"
 )
 
+// FiltrarQuestoes busca questões com base nos filtros enviados no corpo da requisição.
 func FiltrarQuestoes(w http.ResponseWriter, r *http.Request) {
 	var questoes []structs.QuestaoSearch
 	var filtros map[string]interface{}
 
-	// Se for POST, lê o body com os filtros
+	// Decodifica os filtros do corpo da requisição POST
 	if r.Method == "POST" && r.ContentLength > 0 {
 		err := json.NewDecoder(r.Body).Decode(&filtros)
 		if err != nil {
@@ -22,23 +24,28 @@ func FiltrarQuestoes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Prepara os parâmetros para a função buscar_questoes
+	// Prepara os parâmetros para a chamada da função RPC "buscar_questoes"
 	params := map[string]interface{}{}
 
 	if filtros != nil {
-		// Filtra por enunciado
+		// Filtro por enunciado
 		if enunciado, ok := filtros["enunciado"].(string); ok && enunciado != "" {
 			params["p_enunciado"] = enunciado
 		}
 
-		// Filtra por dificuldade
+		// Filtro por dificuldade
 		if dificuldade, ok := filtros["dificuldade"].(string); ok && dificuldade != "" {
 			params["p_dificuldade"] = dificuldade
 		}
 
-		// Filtra por assuntos
+		// Filtro por ano da questão
+		// JSON decodifica números como float64, então precisamos fazer a conversão.
+		if ano, ok := filtros["ano_questao"].(float64); ok && ano > 0 {
+			params["p_ano_questao"] = int(ano) // Convertido para int
+		}
+
+		// Filtro por assuntos
 		if assuntosInterface, ok := filtros["assuntos"].([]interface{}); ok && len(assuntosInterface) > 0 {
-			// Converte []interface{} para []string
 			assuntosStr := make([]string, 0, len(assuntosInterface))
 			for _, v := range assuntosInterface {
 				if str, ok := v.(string); ok && str != "" {
@@ -51,29 +58,31 @@ func FiltrarQuestoes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Chama a função buscar_questoes do Supabase
 	result := config.SupabaseClient.Rpc("buscar_questoes", "", params)
 
 	err := json.Unmarshal([]byte(result), &questoes)
-
 	if err != nil {
 		http.Error(w, "Erro ao buscar questões: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Retorna JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(questoes)
 }
 
+type SupabaseError struct {
+	Code    string `json:"code"`
+	Details string `json:"details"`
+	Hint    string `json:"hint"`
+	Message string `json:"message"`
+}
+
 func AddQuestao(w http.ResponseWriter, r *http.Request) {
-	// Lê o body bruto para debug
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Erro ao ler body", http.StatusBadRequest)
 		return
 	}
-
 	r.Body = io.NopCloser(strings.NewReader(string(body)))
 
 	var novaQuestao structs.Questao
@@ -89,11 +98,20 @@ func AddQuestao(w http.ResponseWriter, r *http.Request) {
 		"p_respostacorreta": novaQuestao.RespostaCorreta,
 		"p_dificuldade":     novaQuestao.Dificuldade,
 		"p_assuntos":        novaQuestao.Assuntos,
+		"p_ano_questao":     novaQuestao.AnoQuestao,
 	}
 
+	// Chama a função RPC do Supabase
 	result := config.SupabaseClient.Rpc("inserir_questao", "", params)
 
-	// Retorna o resultado
+	var supabaseErr SupabaseError
+	if json.Unmarshal([]byte(result), &supabaseErr) == nil && supabaseErr.Code != "" {
+
+		errorMsg := fmt.Sprintf("Erro do Supabase: %s (Hint: %s)", supabaseErr.Message, supabaseErr.Hint)
+		http.Error(w, errorMsg, http.StatusBadRequest)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"id":      result,
